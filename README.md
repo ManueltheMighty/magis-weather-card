@@ -7,7 +7,8 @@ a dynamic background image based on the current weather condition, the current
 time instead of a location name, a warning icon when a weather alert is active,
 and both hourly and daily forecasts – all in a single card, no `card_mod` required.
 
-![Screenshot](docs/screenshot.png)
+<img width="441" height="520" alt="image" src="https://github.com/user-attachments/assets/fe10fadf-7b85-473f-9bca-2a8a8c592c81" />
+
 
 ## Installation
 
