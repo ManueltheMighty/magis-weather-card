@@ -1,0 +1,7 @@
+{
+  "name": "MagIS Weather Card",
+  "render_readme": true,
+  "filename": "magis-weather-card.js",
+  "content_in_root": true,
+  "homeassistant": "2023.9.0"
+}
