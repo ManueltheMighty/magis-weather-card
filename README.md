@@ -7,8 +7,7 @@ a dynamic background image based on the current weather condition, the current
 time instead of a location name, a warning icon when a weather alert is active,
 and both hourly and daily forecasts – all in a single card, no `card_mod` required.
 
-<img width="441" height="520" alt="image" src="https://github.com/user-attachments/assets/fe10fadf-7b85-473f-9bca-2a8a8c592c81" />
-
+![Screenshot](docs/screenshot.png)
 
 ## Installation
 
@@ -67,8 +66,8 @@ background_images:
 | Option                     | Type              | Required | Default  | Description                                                                   |
 | --------------------------- | ---------------- | -------- | -------- | ------------------------------------------------------------------------------- |
 | `entity`                    | string           | yes      | –        | Weather entity (`weather.xxx`)                                                  |
-| `warning_entity`             | string           | no       | –        | Entity holding the current warning level (0 = no warning, 1-4 = warning level)  |
-| `advance_warning_entity`     | string           | no       | –        | Entity holding the advance warning level                                        |
+| `warning_entity`             | string           | no       | –        | Entity holding the current warning level (0 = no warning, 1-4 = warning level). If the entity has a `warning_1_name` or `warning_1_headline` attribute (e.g. the DWD Weather Warnings integration), its short description (e.g. "Thunderstorm", "Heavy rain") is shown next to the icon |
+| `advance_warning_entity`     | string           | no       | –        | Entity holding the advance warning level (same attribute support as above)      |
 | `default_background`        | string            | no       | –        | Background image used when no image is set for the current condition           |
 | `background_images`          | map              | no       | `{}`     | Weather condition -> image path (string) or multiple image paths (array, see below) |
 | `forecast_slots_hourly`      | number            | no       | `8`      | Number of hours shown in the hourly forecast                                    |

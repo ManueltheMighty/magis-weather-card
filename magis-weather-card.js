@@ -212,6 +212,16 @@ class MagisWeatherCard extends HTMLElement {
     return Number.isNaN(n) ? 0 : n;
   }
 
+  // Reads level + a short description from a DWD-style warning entity
+  // (attributes warning_1_name / warning_1_headline), e.g. "Starkregen", "Sturm".
+  _warningInfo(entityId) {
+    const level = this._warnLevel(entityId);
+    if (!level || !this._hass || !entityId) return { level, name: '' };
+    const st = this._hass.states[entityId];
+    const name = (st && (st.attributes.warning_1_name || st.attributes.warning_1_headline)) || '';
+    return { level, name };
+  }
+
   _renderHourly() {
     if (!this._hourly.length) return '';
     const now = new Date();
@@ -261,15 +271,23 @@ class MagisWeatherCard extends HTMLElement {
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-    const currentWarn = this._warnLevel(this.config.warning_entity);
-    const advanceWarn = this._warnLevel(this.config.advance_warning_entity);
+    const currentWarnInfo = this._warningInfo(this.config.warning_entity);
+    const advanceWarnInfo = this._warningInfo(this.config.advance_warning_entity);
 
-    let warningIcon = '';
-    if (currentWarn > 0) {
-      const color = currentWarn >= 3 ? '#ff1744' : currentWarn === 2 ? '#ff9100' : '#ffea00';
-      warningIcon = `<ha-icon icon="mdi:alert" style="color:${color}" title="Active weather warning (level ${currentWarn})"></ha-icon>`;
-    } else if (advanceWarn > 0) {
-      warningIcon = `<ha-icon icon="mdi:alert-outline" style="color:rgba(255,255,255,0.6)" title="Advance warning (level ${advanceWarn})"></ha-icon>`;
+    let warningHtml = '';
+    if (currentWarnInfo.level > 0) {
+      const color = currentWarnInfo.level >= 3 ? '#ff1744' : currentWarnInfo.level === 2 ? '#ff9100' : '#ffea00';
+      warningHtml = `
+        <div class="warning-info" title="Active weather warning (level ${currentWarnInfo.level})">
+          <ha-icon icon="mdi:alert" style="color:${color}"></ha-icon>
+          ${currentWarnInfo.name ? `<span>${currentWarnInfo.name}</span>` : ''}
+        </div>`;
+    } else if (advanceWarnInfo.level > 0) {
+      warningHtml = `
+        <div class="warning-info" title="Advance warning (level ${advanceWarnInfo.level})">
+          <ha-icon icon="mdi:alert-outline" style="color:rgba(255,255,255,0.6)"></ha-icon>
+          ${advanceWarnInfo.name ? `<span>${advanceWarnInfo.name}</span>` : ''}
+        </div>`;
     }
 
     const windHtml = windSpeed !== undefined
@@ -307,16 +325,26 @@ class MagisWeatherCard extends HTMLElement {
           flex-direction: column;
           background: linear-gradient(to bottom, rgba(0,0,0,0), rgba(0,0,0,0));
         }
-        .warning-badge {
-          position: absolute;
-          top: 16px;
-          right: 16px;
-          --mdc-icon-size: 26px;
-        }
         .header {
           display: flex;
           justify-content: space-between;
-          align-items: baseline;
+          align-items: flex-start;
+        }
+        .header-left {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+        .warning-info {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 13px;
+          opacity: 0.95;
+          text-shadow: ${textShadowCss};
+        }
+        .warning-info ha-icon {
+          --mdc-icon-size: 20px;
         }
         .time {
           font-size: 40px;
@@ -405,9 +433,11 @@ class MagisWeatherCard extends HTMLElement {
       </style>
       <ha-card>
         <div class="overlay">
-          ${warningIcon ? `<div class="warning-badge">${warningIcon}</div>` : ''}
           <div class="header">
-            <div class="time">${timeStr}</div>
+            <div class="header-left">
+              <div class="time">${timeStr}</div>
+              ${warningHtml}
+            </div>
             <div class="temp">${temp !== undefined ? Math.round(temp) + '°' : '--'}</div>
           </div>
           <div class="current">
