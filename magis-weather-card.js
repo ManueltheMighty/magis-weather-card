@@ -51,6 +51,48 @@ const CONDITION_ICONS = {
   'exceptional': 'mdi:alert-circle-outline',
 };
 
+// Some weather integrations (or template/custom entities) report the
+// condition in German instead of the standard HA condition slugs. This
+// maps common German terms to the standard slugs used above and in
+// background_images, so both work regardless of which one your entity uses.
+const GERMAN_CONDITION_ALIASES = {
+  'sonnig': 'sunny',
+  'klar': 'sunny',
+  'klare nacht': 'clear-night',
+  'wolkenlos': 'clear-night',
+  'bewölkt': 'cloudy',
+  'bewoelkt': 'cloudy',
+  'bedeckt': 'cloudy',
+  'stark bewölkt': 'cloudy',
+  'stark bewoelkt': 'cloudy',
+  'wolkig': 'partlycloudy',
+  'teilweise bewölkt': 'partlycloudy',
+  'teilweise bewoelkt': 'partlycloudy',
+  'leicht bewölkt': 'partlycloudy',
+  'leicht bewoelkt': 'partlycloudy',
+  'regen': 'rainy',
+  'regnerisch': 'rainy',
+  'leichter regen': 'rainy',
+  'schauer': 'rainy',
+  'regenschauer': 'rainy',
+  'starkregen': 'pouring',
+  'heftiger regen': 'pouring',
+  'schnee': 'snowy',
+  'schneefall': 'snowy',
+  'schneeschauer': 'snowy',
+  'schneeregen': 'snowy-rainy',
+  'nebel': 'fog',
+  'neblig': 'fog',
+  'dunst': 'fog',
+  'windig': 'windy',
+  'sturm': 'windy',
+  'orkan': 'windy',
+  'hagel': 'hail',
+  'gewitter': 'lightning',
+  'gewitter mit regen': 'lightning-rainy',
+  'unwetter': 'lightning-rainy',
+};
+
 class MagisWeatherCard extends HTMLElement {
   constructor() {
     super();
@@ -183,12 +225,23 @@ class MagisWeatherCard extends HTMLElement {
     }
   }
 
+  // Lowercases and maps German condition names to the standard slug.
+  // Unknown values pass through unchanged (so standard English slugs
+  // keep working as before).
+  _normalizeCondition(condition) {
+    if (!condition) return '';
+    const key = String(condition).trim().toLowerCase();
+    return GERMAN_CONDITION_ALIASES[key] || key;
+  }
+
   _conditionIcon(condition) {
-    return CONDITION_ICONS[condition] || 'mdi:weather-cloudy';
+    const normalized = this._normalizeCondition(condition);
+    return CONDITION_ICONS[normalized] || 'mdi:weather-cloudy';
   }
 
   _background(condition) {
-    const raw = (this.config.background_images && this.config.background_images[condition])
+    const normalized = this._normalizeCondition(condition);
+    const raw = (this.config.background_images && this.config.background_images[normalized])
       || this.config.default_background
       || '';
     // Accepts either a single path (string) or multiple paths (array) per
@@ -197,8 +250,8 @@ class MagisWeatherCard extends HTMLElement {
     // triggered by the clock).
     const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
     if (!list.length) return '';
-    if (this._bgCondition !== condition || !this._bgCurrent || !list.includes(this._bgCurrent)) {
-      this._bgCondition = condition;
+    if (this._bgCondition !== normalized || !this._bgCurrent || !list.includes(this._bgCurrent)) {
+      this._bgCondition = normalized;
       this._bgCurrent = list[Math.floor(Math.random() * list.length)];
     }
     return this._bgCurrent;

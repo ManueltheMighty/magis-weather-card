@@ -107,6 +107,18 @@ tap_action:
   # target: {entity_id: light.living_room}
 ```
 
+## German condition names
+
+Standard Home Assistant weather entities report their condition using fixed
+English slugs (`sunny`, `cloudy`, `rainy`, ...), but some integrations or
+template/custom entities report German terms instead (`sonnig`, `bewölkt`,
+`regnerisch`, ...). The card automatically translates a number of common
+German condition names to the matching standard slug before looking up the
+icon and background image, so `background_images` always uses the English
+keys shown above regardless of which one your entity reports. If your
+entity uses a German term that isn't recognized yet, open an issue or add
+it to the `GERMAN_CONDITION_ALIASES` map near the top of the file.
+
 ## Background image sources
 
 A few ways to get more/varying background images:
