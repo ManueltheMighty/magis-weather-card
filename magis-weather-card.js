@@ -16,6 +16,8 @@
  * forecast_slots_hourly: 8
  * forecast_slots_daily: 7
  * text_icon_shadow: true
+ * # theme: wetter_hintergrund        # optional: take the background from a HA theme
+ * # theme_background_variable: lovelace-background
  * tap_action:
  *   action: more-info
  * background_images:
@@ -93,6 +95,30 @@ const GERMAN_CONDITION_ALIASES = {
   'unwetter': 'lightning-rainy',
 };
 
+// Escapes text before it is placed into innerHTML. Entity attributes (for
+// example warning names coming from an external service) are not trusted.
+function escapeHtml(value) {
+  return String(value === undefined || value === null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Accepts only plain http(s) or relative URLs without characters that could
+// break out of a CSS url(...) or an HTML attribute. Returns '' otherwise.
+function safeUrl(value) {
+  if (typeof value !== 'string') return '';
+  const v = value.trim();
+  if (!v || /[\s"'()<>\\`]/.test(v) || /[\u0000-\u001f]/.test(v)) return '';
+  if (/^[a-z][a-z0-9+.-]*:/i.test(v)) {
+    return /^https?:\/\//i.test(v) ? v : '';
+  }
+  if (v.startsWith('//')) return '';
+  return v;
+}
+
 class MagisWeatherCard extends HTMLElement {
   constructor() {
     super();
@@ -107,6 +133,10 @@ class MagisWeatherCard extends HTMLElement {
   setConfig(config) {
     if (!config.entity) {
       throw new Error('Please provide "entity" (a weather entity) in the card configuration.');
+    }
+    if (this._themeVarApplied) {
+      this.style.removeProperty(this._themeVarApplied);
+      this._themeVarApplied = null;
     }
     this.config = {
       background_images: {},
@@ -147,17 +177,23 @@ class MagisWeatherCard extends HTMLElement {
         break;
 
       case 'navigate':
-        if (actionConfig.navigation_path) {
+        if (typeof actionConfig.navigation_path === 'string' && /^\/(?!\/)/.test(actionConfig.navigation_path)) {
           window.history.pushState(null, '', actionConfig.navigation_path);
           this.dispatchEvent(new CustomEvent('location-changed', { bubbles: true, composed: true }));
         }
         break;
 
-      case 'url':
-        if (actionConfig.url_path) {
-          window.open(actionConfig.url_path, actionConfig.new_tab === false ? '_self' : '_blank');
+      case 'url': {
+        const target = safeUrl(actionConfig.url_path);
+        if (target) {
+          if (actionConfig.new_tab === false) {
+            window.open(target, '_self');
+          } else {
+            window.open(target, '_blank', 'noopener,noreferrer');
+          }
         }
         break;
+      }
 
       case 'call-service':
       case 'perform-action': {
@@ -234,12 +270,55 @@ class MagisWeatherCard extends HTMLElement {
     return GERMAN_CONDITION_ALIASES[key] || key;
   }
 
+  // Lets a background entry be either an image or a video (mp4/webm/mov/m4v),
+  // detected purely by file extension -- no separate config needed.
+  _isVideo(path) {
+    return /\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(path || '');
+  }
+
   _conditionIcon(condition) {
     const normalized = this._normalizeCondition(condition);
     return CONDITION_ICONS[normalized] || 'mdi:weather-cloudy';
   }
 
+  // Reads the background from a Home Assistant theme (config: theme).
+  // The named theme's value for the configured CSS variable is applied to
+  // this card (as HA's own per-card "theme:" option does for all variables,
+  // but limited to this one variable), then read back via computed style, so
+  // var() references resolve and light/dark modes are respected. Only a plain
+  // url(...) or path that passes safeUrl() is used; gradients/colors are
+  // ignored and the card falls back to its own images.
+  _themeBackground() {
+    const themeName = this.config.theme;
+    if (!themeName || !this._hass) return '';
+    const name = String(this.config.theme_background_variable || 'lovelace-background').replace(/^--/, '');
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) return '';
+    const cssVar = '--' + name;
+
+    const themes = this._hass.themes && this._hass.themes.themes;
+    const def = themes && themes[themeName];
+    if (def) {
+      let value = def[name];
+      const modeDef = def.modes && def.modes[this._hass.themes.darkMode ? 'dark' : 'light'];
+      if (modeDef && modeDef[name] !== undefined) value = modeDef[name];
+      if (typeof value === 'string' || typeof value === 'number') {
+        this.style.setProperty(cssVar, String(value));
+        this._themeVarApplied = cssVar;
+      } else {
+        this.style.removeProperty(cssVar);
+      }
+    }
+
+    const computed = String(getComputedStyle(this).getPropertyValue(cssVar) || '').trim();
+    if (!computed) return '';
+    const m = /url\(\s*(['"]?)([^'")]+)\1\s*\)/i.exec(computed);
+    return safeUrl(m ? m[2].trim() : computed);
+  }
+
   _background(condition) {
+    const themed = this._themeBackground();
+    if (themed) return themed;
+
     const normalized = this._normalizeCondition(condition);
     const raw = (this.config.background_images && this.config.background_images[normalized])
       || this.config.default_background
@@ -248,7 +327,7 @@ class MagisWeatherCard extends HTMLElement {
     // weather condition. With multiple, one is picked at random and kept
     // until the condition changes (avoids flicker on every 30s redraw
     // triggered by the clock).
-    const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+    const list = (Array.isArray(raw) ? raw : (raw ? [raw] : [])).map(safeUrl).filter(Boolean);
     if (!list.length) return '';
     if (this._bgCondition !== normalized || !this._bgCurrent || !list.includes(this._bgCurrent)) {
       this._bgCondition = normalized;
@@ -312,7 +391,7 @@ class MagisWeatherCard extends HTMLElement {
     const stateObj = this._hass.states[this.config.entity];
 
     if (!stateObj) {
-      this.shadowRoot.innerHTML = `<ha-card><div style="padding:16px;">Entity ${this.config.entity} not found.</div></ha-card>`;
+      this.shadowRoot.innerHTML = `<ha-card><div style="padding:16px;">Entity ${escapeHtml(this.config.entity)} not found.</div></ha-card>`;
       return;
     }
 
@@ -321,6 +400,13 @@ class MagisWeatherCard extends HTMLElement {
     const windSpeed = stateObj.attributes.wind_speed;
     const windUnit = stateObj.attributes.wind_speed_unit || '';
     const bg = this._background(condition);
+    const bgIsVideo = this._isVideo(bg);
+    // Keep a reference to a currently-playing background video (if any)
+    // before the DOM gets rebuilt below, so we can re-attach the same
+    // element afterwards instead of restarting playback on every redraw
+    // (the clock alone triggers a redraw every 30s).
+    const previousVideo = this.shadowRoot.querySelector('video.bg-video');
+    const previousVideoSrc = previousVideo ? previousVideo.currentSrc : null;
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -333,18 +419,18 @@ class MagisWeatherCard extends HTMLElement {
       warningHtml = `
         <div class="warning-info" title="Active weather warning (level ${currentWarnInfo.level})">
           <ha-icon icon="mdi:alert" style="color:${color}"></ha-icon>
-          ${currentWarnInfo.name ? `<span>${currentWarnInfo.name}</span>` : ''}
+          ${currentWarnInfo.name ? `<span>${escapeHtml(currentWarnInfo.name)}</span>` : ''}
         </div>`;
     } else if (advanceWarnInfo.level > 0) {
       warningHtml = `
         <div class="warning-info" title="Advance warning (level ${advanceWarnInfo.level})">
           <ha-icon icon="mdi:alert-outline" style="color:rgba(255,255,255,0.6)"></ha-icon>
-          ${advanceWarnInfo.name ? `<span>${advanceWarnInfo.name}</span>` : ''}
+          ${advanceWarnInfo.name ? `<span>${escapeHtml(advanceWarnInfo.name)}</span>` : ''}
         </div>`;
     }
 
     const windHtml = windSpeed !== undefined
-      ? `<div class="wind-row"><ha-icon icon="mdi:windsock"></ha-icon><span>${Math.round(windSpeed)} ${windUnit}</span></div>`
+      ? `<div class="wind-row"><ha-icon icon="mdi:windsock"></ha-icon><span>${Math.round(windSpeed)} ${escapeHtml(windUnit)}</span></div>`
       : '';
 
     // Text/icon shadow -- toggled from the editor (text_icon_shadow).
@@ -360,7 +446,7 @@ class MagisWeatherCard extends HTMLElement {
           overflow: hidden;
           border-radius: 15px;
           box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-          background-image: ${bg ? `url('${bg}')` : 'none'};
+          background-image: ${bg && !bgIsVideo ? `url('${bg}')` : 'none'};
           background-color: ${bg ? 'transparent' : 'var(--card-background-color)'};
           background-size: cover;
           background-position: center;
@@ -369,8 +455,18 @@ class MagisWeatherCard extends HTMLElement {
           min-height: 420px;
           cursor: ${this.config.tap_action && this.config.tap_action.action !== 'none' ? 'pointer' : 'default'};
         }
+        .bg-video {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          z-index: 0;
+        }
         .overlay {
           position: relative;
+          z-index: 1;
           height: 100%;
           box-sizing: border-box;
           padding: 16px;
@@ -485,6 +581,7 @@ class MagisWeatherCard extends HTMLElement {
         }
       </style>
       <ha-card>
+        ${bgIsVideo ? `<video class="bg-video" autoplay muted loop playsinline src="${bg}"></video>` : ''}
         <div class="overlay">
           <div class="header">
             <div class="header-left">
@@ -502,6 +599,16 @@ class MagisWeatherCard extends HTMLElement {
         </div>
       </ha-card>
     `;
+
+    // Re-attach the already-playing video element if the source hasn't
+    // actually changed, so it keeps playing smoothly instead of
+    // restarting on every redraw.
+    if (bgIsVideo && previousVideo && previousVideoSrc) {
+      const newVideo = this.shadowRoot.querySelector('video.bg-video');
+      if (newVideo && previousVideoSrc === newVideo.currentSrc) {
+        newVideo.replaceWith(previousVideo);
+      }
+    }
   }
 
   getCardSize() {
@@ -530,7 +637,8 @@ class MagisWeatherCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    if (this._rendered) {
+    const themeCount = hass && hass.themes && hass.themes.themes ? Object.keys(hass.themes.themes).length : 0;
+    if (this._rendered && themeCount === (this._themeCountAtRender || 0)) {
       this.querySelectorAll('ha-entity-picker').forEach((p) => {
         p.hass = hass;
       });
@@ -562,7 +670,13 @@ class MagisWeatherCardEditor extends HTMLElement {
     } else {
       value = ev.target.value;
     }
-    this._config = { ...this._config, [key]: value };
+    if (value === '' || value === undefined) {
+      const next = { ...this._config };
+      delete next[key];
+      this._config = next;
+    } else {
+      this._config = { ...this._config, [key]: value };
+    }
     this._fireChanged();
   }
 
@@ -597,6 +711,10 @@ class MagisWeatherCardEditor extends HTMLElement {
     if (!this._config) return;
     const shadowChecked = this._config.text_icon_shadow !== false;
     const tap = this._config.tap_action || { action: 'more-info' };
+    const themes = (this._hass && this._hass.themes && this._hass.themes.themes) || {};
+    const themeNames = Object.keys(themes).sort();
+    this._themeCountAtRender = themeNames.length;
+    if (this._config.theme && !themeNames.includes(this._config.theme)) themeNames.push(this._config.theme);
     this.innerHTML = `
       <style>
         .row { display:flex; flex-direction:column; margin-bottom:14px; }
@@ -659,8 +777,21 @@ class MagisWeatherCardEditor extends HTMLElement {
         <ha-entity-picker data-config-key="advance_warning_entity"></ha-entity-picker>
       </div>
       <div class="row">
+        <label>Theme (take the background from a Home Assistant theme instead of the images below)</label>
+        <select data-config-key="theme">
+          <option value="">None (use the images below)</option>
+          ${themeNames.map((n) => `<option value="${escapeHtml(n)}" ${this._config.theme === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+        </select>
+      </div>
+      ${this._config.theme ? `
+      <div class="row">
+        <label>Theme background variable (CSS variable holding the background URL)</label>
+        <input type="text" data-config-key="theme_background_variable" value="${escapeHtml(this._config.theme_background_variable || '')}" placeholder="lovelace-background">
+        <div class="hint">Default: lovelace-background. The value must be a plain url(...) or path; gradients and colors are ignored. If the theme provides nothing, the images below are used as fallback.</div>
+      </div>` : ''}
+      <div class="row">
         <label>Default background image (default_background)</label>
-        <input type="text" data-config-key="default_background" value="${this._config.default_background || ''}">
+        <input type="text" data-config-key="default_background" value="${escapeHtml(this._config.default_background)}">
       </div>
       <div class="row">
         <label>Number of hours in the hourly forecast</label>
@@ -688,17 +819,17 @@ class MagisWeatherCardEditor extends HTMLElement {
       ${tap.action === 'navigate' ? `
       <div class="row">
         <label>Navigation path</label>
-        <input type="text" data-tap-key="navigation_path" value="${tap.navigation_path || ''}" placeholder="/lovelace/weather">
+        <input type="text" data-tap-key="navigation_path" value="${escapeHtml(tap.navigation_path)}" placeholder="/lovelace/weather">
       </div>` : ''}
       ${tap.action === 'url' ? `
       <div class="row">
         <label>URL</label>
-        <input type="text" data-tap-key="url_path" value="${tap.url_path || ''}" placeholder="https://...">
+        <input type="text" data-tap-key="url_path" value="${escapeHtml(tap.url_path)}" placeholder="https://...">
       </div>` : ''}
       ${tap.action === 'perform-action' ? `
       <div class="row">
         <label>Service (domain.service)</label>
-        <input type="text" data-tap-key="service" value="${tap.service || tap.perform_action || ''}" placeholder="light.turn_on">
+        <input type="text" data-tap-key="service" value="${escapeHtml(tap.service || tap.perform_action)}" placeholder="light.turn_on">
       </div>` : ''}
       <div class="row">
         <label>Background images per weather condition</label>
@@ -713,7 +844,7 @@ class MagisWeatherCardEditor extends HTMLElement {
                 placeholder="/local/backgrounds/weather/${condition}.jpg"
                 value="${(() => {
                   const v = this._config.background_images && this._config.background_images[condition];
-                  return Array.isArray(v) ? v.join(', ') : (v || '');
+                  return escapeHtml(Array.isArray(v) ? v.join(', ') : v);
                 })()}"
               >
             </div>
@@ -734,7 +865,7 @@ class MagisWeatherCardEditor extends HTMLElement {
       });
     });
 
-    this.querySelectorAll('input[data-config-key]').forEach((input) => {
+    this.querySelectorAll('input[data-config-key], select[data-config-key]').forEach((input) => {
       input.addEventListener('change', (ev) => this._textChanged(ev));
     });
 
