@@ -68,6 +68,8 @@ background_images:
 | `entity`                    | string           | yes      | –        | Weather entity (`weather.xxx`)                                                  |
 | `warning_entity`             | string           | no       | –        | Entity holding the current warning level (0 = no warning, 1-4 = warning level). If the entity has a `warning_1_name` or `warning_1_headline` attribute (e.g. the DWD Weather Warnings integration), its short description (e.g. "Thunderstorm", "Heavy rain") is shown next to the icon |
 | `advance_warning_entity`     | string           | no       | –        | Entity holding the advance warning level (same attribute support as above)      |
+| `theme`                     | string           | no       | –        | Name of a Home Assistant theme. If set, the background is taken from that theme (see below); `background_images` / `default_background` act as fallback |
+| `theme_background_variable`  | string           | no       | `lovelace-background` | CSS variable of the theme that holds the background (without the leading `--`) |
 | `default_background`        | string            | no       | –        | Background image used when no image is set for the current condition           |
 | `background_images`          | map              | no       | `{}`     | Weather condition -> image path (string) or multiple image paths (array, see below) |
 | `forecast_slots_hourly`      | number            | no       | `8`      | Number of hours shown in the hourly forecast                                    |
@@ -106,6 +108,63 @@ tap_action:
   # data: {}
   # target: {entity_id: light.living_room}
 ```
+
+## Background from a Home Assistant theme
+
+Instead of listing image URLs per weather condition, you can point the card
+at a Home Assistant theme and let the theme decide which background to show
+(for example by weather, time of day or season):
+
+```yaml
+type: custom:magis-weather-card
+entity: weather.home
+theme: my_weather_theme
+# theme_background_variable: lovelace-background   # default
+```
+
+How it works: the card reads the theme's value for the configured CSS
+variable (`lovelace-background` by default; light/dark `modes` are respected),
+and uses the `url(...)` in it. If the theme is the one currently active, its
+variables are already available; otherwise the card applies just that one
+variable to itself. If the theme provides no usable value, the card falls
+back to `background_images` / `default_background`.
+
+Limits: the value must contain a plain `url(...)` or a path (images and
+videos both work). Gradients and plain colors are ignored. The theme must
+expose the background as a CSS variable; a background that is only applied
+through `card_mod` CSS rules is not visible to the card.
+
+## Security notes
+
+- Background URLs (from the config, from a theme or from a sensor-driven
+  theme) are only accepted as plain `http(s)` or relative paths without
+  quotes, spaces, parentheses or angle brackets. Anything else (for example
+  `javascript:` or `data:` URLs, or values that try to break out of the CSS)
+  is ignored.
+- Text that comes from entity attributes (for example the warning name) is
+  HTML-escaped before it is rendered.
+- `tap_action: url` only opens `http(s)`/relative URLs and uses
+  `noopener,noreferrer` for new tabs; `navigate` only accepts paths inside
+  Home Assistant (starting with a single `/`).
+- Background images/videos are loaded from the URLs you configure, so only
+  point the card at sources you trust.
+
+## Video backgrounds
+
+Any background entry (`default_background`, or an entry in `background_images`,
+including inside an array of multiple options) can be a video file instead of
+an image. Supported extensions: `.mp4`, `.webm`, `.mov`, `.m4v`. Detection is
+automatic based on the file extension, no extra config needed:
+
+```yaml
+background_images:
+  rainy: /local/backgrounds/weather/rainy.mp4
+```
+
+The video plays muted, looped, and inline (required for autoplay in browsers).
+Keep in mind: video files are much larger than images, and continuous
+looping playback uses more CPU/GPU than a static image — this matters
+especially on lower-powered wallboards/tablets.
 
 ## German condition names
 
