@@ -285,14 +285,17 @@ class MagisWeatherCard extends HTMLElement {
   // The named theme's value for the configured CSS variable is applied to
   // this card (as HA's own per-card "theme:" option does for all variables,
   // but limited to this one variable), then read back via computed style, so
-  // var() references resolve and light/dark modes are respected. Only a plain
-  // url(...) or path that passes safeUrl() is used; gradients/colors are
-  // ignored and the card falls back to its own images.
-  _themeBackground() {
+  // var() references resolve and light/dark modes are respected. Every
+  // url(...) in the value that passes safeUrl() is used (several entries are
+  // stacked as layers, later ones act as fallbacks for missing files);
+  // gradients/colors are ignored and the card falls back to its own images.
+  // The variable may also be declared by the theme on an ancestor element
+  // (for example via card-mod on the view); it is then inherited.
+  _themeBackgrounds() {
     const themeName = this.config.theme;
-    if (!themeName || !this._hass) return '';
+    if (!themeName || !this._hass) return [];
     const name = String(this.config.theme_background_variable || 'lovelace-background').replace(/^--/, '');
-    if (!/^[A-Za-z0-9_-]+$/.test(name)) return '';
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) return [];
     const cssVar = '--' + name;
 
     const themes = this._hass.themes && this._hass.themes.themes;
@@ -310,14 +313,29 @@ class MagisWeatherCard extends HTMLElement {
     }
 
     const computed = String(getComputedStyle(this).getPropertyValue(cssVar) || '').trim();
-    if (!computed) return '';
-    const m = /url\(\s*(['"]?)([^'")]+)\1\s*\)/i.exec(computed);
-    return safeUrl(m ? m[2].trim() : computed);
+    if (!computed) return [];
+    const urls = [];
+    const re = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+    let m;
+    while ((m = re.exec(computed)) !== null && urls.length < 8) {
+      const u = safeUrl(m[2].trim());
+      if (u) urls.push(u);
+    }
+    if (!urls.length && !/url\(/i.test(computed)) {
+      const bare = safeUrl(computed);
+      if (bare) urls.push(bare);
+    }
+    return urls;
   }
 
   _background(condition) {
-    const themed = this._themeBackground();
-    if (themed) return themed;
+    const themed = this._themeBackgrounds();
+    if (themed.length) {
+      // A video cannot be a CSS background layer: if the first entry is a
+      // video it is used alone, otherwise only the image layers are stacked.
+      this._bgLayers = this._isVideo(themed[0]) ? [themed[0]] : themed.filter((u) => !this._isVideo(u));
+      return this._bgLayers[0];
+    }
 
     const normalized = this._normalizeCondition(condition);
     const raw = (this.config.background_images && this.config.background_images[normalized])
@@ -328,11 +346,15 @@ class MagisWeatherCard extends HTMLElement {
     // until the condition changes (avoids flicker on every 30s redraw
     // triggered by the clock).
     const list = (Array.isArray(raw) ? raw : (raw ? [raw] : [])).map(safeUrl).filter(Boolean);
-    if (!list.length) return '';
+    if (!list.length) {
+      this._bgLayers = [];
+      return '';
+    }
     if (this._bgCondition !== normalized || !this._bgCurrent || !list.includes(this._bgCurrent)) {
       this._bgCondition = normalized;
       this._bgCurrent = list[Math.floor(Math.random() * list.length)];
     }
+    this._bgLayers = [this._bgCurrent];
     return this._bgCurrent;
   }
 
@@ -446,7 +468,7 @@ class MagisWeatherCard extends HTMLElement {
           overflow: hidden;
           border-radius: 15px;
           box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-          background-image: ${bg && !bgIsVideo ? `url('${bg}')` : 'none'};
+          background-image: ${!bgIsVideo && this._bgLayers && this._bgLayers.length ? this._bgLayers.map((u) => `url('${u}')`).join(', ') : 'none'};
           background-color: ${bg ? 'transparent' : 'var(--card-background-color)'};
           background-size: cover;
           background-position: center;
