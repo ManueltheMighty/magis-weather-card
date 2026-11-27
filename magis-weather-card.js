@@ -17,7 +17,8 @@
  * forecast_slots_daily: 7
  * text_icon_shadow: true
  * # theme: wetter_hintergrund        # optional: take the background from a HA theme
- * # theme_background_variable: lovelace-background
+ * # theme_background_variable: magis-weather-background
+ * # background_folder: /local/backgrounds/weather   # <folder>/<season>/<day|night>/<condition>.jpg
  * tap_action:
  *   action: more-info
  * background_images:
@@ -47,6 +48,7 @@ const CONDITION_ICONS = {
   'snowy-rainy': 'mdi:weather-snowy-rainy',
   'fog': 'mdi:weather-fog',
   'windy': 'mdi:weather-windy',
+  'windy-variant': 'mdi:weather-windy-variant',
   'hail': 'mdi:weather-hail',
   'lightning': 'mdi:weather-lightning',
   'lightning-rainy': 'mdi:weather-lightning-rainy',
@@ -134,10 +136,13 @@ class MagisWeatherCard extends HTMLElement {
     if (!config.entity) {
       throw new Error('Please provide "entity" (a weather entity) in the card configuration.');
     }
-    if (this._themeVarApplied) {
-      this.style.removeProperty(this._themeVarApplied);
-      this._themeVarApplied = null;
+    if (this._themeVarsApplied) {
+      this._themeVarsApplied.forEach((v) => this.style.removeProperty(v));
+      this._themeVarsApplied = null;
     }
+    this._themeWarned = null;
+    this._lastThemeUrls = null;
+    this._themeRetries = 0;
     this.config = {
       background_images: {},
       default_background: '',
@@ -226,6 +231,10 @@ class MagisWeatherCard extends HTMLElement {
 
   disconnectedCallback() {
     clearInterval(this._clockTimer);
+    if (this._themeRetryTimer) {
+      clearTimeout(this._themeRetryTimer);
+      this._themeRetryTimer = null;
+    }
     if (this._unsubHourly) this._unsubHourly();
     if (this._unsubDaily) this._unsubDaily();
     this._subscribed = false;
@@ -283,30 +292,36 @@ class MagisWeatherCard extends HTMLElement {
 
   // Reads the background from a Home Assistant theme (config: theme).
   // The named theme's value for the configured CSS variable is applied to
-  // this card (as HA's own per-card "theme:" option does for all variables,
-  // but limited to this one variable), then read back via computed style, so
-  // var() references resolve and light/dark modes are respected. Every
-  // url(...) in the value that passes safeUrl() is used (several entries are
-  // stacked as layers, later ones act as fallbacks for missing files);
-  // gradients/colors are ignored and the card falls back to its own images.
+  // this card (limited to this one variable), then read back via computed
+  // style, so var() references resolve and light/dark modes are respected.
+  // Every url(...) in the value that passes safeUrl() is used (several
+  // entries are stacked as layers, later ones act as fallbacks for missing
+  // files); gradients/colors are ignored.
   // The variable may also be declared by the theme on an ancestor element
-  // (for example via card-mod on the view); it is then inherited.
-  _themeBackgrounds() {
-    const themeName = this.config.theme;
-    if (!themeName || !this._hass) return [];
-    const name = String(this.config.theme_background_variable || 'lovelace-background').replace(/^--/, '');
-    if (!/^[A-Za-z0-9_-]+$/.test(name)) return [];
-    const cssVar = '--' + name;
+  // (for example via card-mod on the view); it is then inherited. NOTE: such
+  // a variable only exists inside the views that rule applies to.
+  // Without theme_background_variable the card tries
+  // --magis-weather-background first, then --lovelace-background.
+  _themeVariableNames() {
+    const configured = this.config.theme_background_variable;
+    const list = configured ? [configured] : ['magis-weather-background', 'lovelace-background'];
+    return list
+      .map((n) => String(n).trim().replace(/^--/, ''))
+      .filter((n) => /^[A-Za-z0-9_-]+$/.test(n));
+  }
 
+  _themeBackgroundFor(name) {
+    const cssVar = '--' + name;
     const themes = this._hass.themes && this._hass.themes.themes;
-    const def = themes && themes[themeName];
+    const def = themes && themes[this.config.theme];
     if (def) {
       let value = def[name];
       const modeDef = def.modes && def.modes[this._hass.themes.darkMode ? 'dark' : 'light'];
       if (modeDef && modeDef[name] !== undefined) value = modeDef[name];
       if (typeof value === 'string' || typeof value === 'number') {
         this.style.setProperty(cssVar, String(value));
-        this._themeVarApplied = cssVar;
+        this._themeVarsApplied = this._themeVarsApplied || new Set();
+        this._themeVarsApplied.add(cssVar);
       } else {
         this.style.removeProperty(cssVar);
       }
@@ -328,12 +343,136 @@ class MagisWeatherCard extends HTMLElement {
     return urls;
   }
 
+  _themeBackgrounds() {
+    if ((!this.config.theme && !this.config.theme_background_variable) || !this._hass) return [];
+    for (const name of this._themeVariableNames()) {
+      const urls = this._themeBackgroundFor(name);
+      if (urls.length) {
+        this._themeWarned = null;
+        this._themeRetries = 0;
+        this._lastThemeUrls = urls;
+        return urls;
+      }
+    }
+    // The variable can disappear for a moment (for example while card-mod
+    // re-applies its style): keep the last known background instead of
+    // switching to an empty card.
+    if (this._lastThemeUrls && this._lastThemeUrls.length) return this._lastThemeUrls;
+    if (this._scheduleThemeRetry()) return [];
+    this._warnThemeEmpty();
+    return [];
+  }
+
+  // card-mod renders its template asynchronously, so the variable can show up
+  // a moment after the first render: look again a few times before warning.
+  // Returns true while a retry is pending or was just scheduled.
+  _scheduleThemeRetry() {
+    const delays = [400, 1200, 3000, 6000];
+    if (this._themeRetryTimer) return true;
+    const n = this._themeRetries || 0;
+    if (n >= delays.length) return false;
+    this._themeRetries = n + 1;
+    this._themeRetryTimer = setTimeout(() => {
+      this._themeRetryTimer = null;
+      this._render();
+    }, delays[n]);
+    return true;
+  }
+
+  // One console hint (per situation) when a theme is configured but gives
+  // no background, so the cause can be found without guessing.
+  _warnThemeEmpty() {
+    const themes = this._hass.themes || {};
+    const names = this._themeVariableNames();
+    const key = [this.config.theme, names.join(','), themes.theme].join('|');
+    if (this._themeWarned === key) return;
+    this._themeWarned = key;
+    const known = !!(themes.themes && themes.themes[this.config.theme]);
+    console.warn(
+      'MagIS Weather Card: ' + (this.config.theme ? 'theme "' + this.config.theme + '"' : 'the configured CSS variable') + ' provided no background. ' +
+      'CSS variable(s) ' + names.map((n) => '--' + n).join(', ') + ' are empty on this card. ' +
+      'Active theme: "' + themes.theme + '"; theme known to Home Assistant: ' + known + '. ' +
+      'The variable must be declared by the active theme in the view that contains this card ' +
+      '(for example via card-mod-view). Falling back to background_folder / background_images.'
+    );
+  }
+
+  _now() {
+    return new Date();
+  }
+
+  // All rendering goes into one container inside the shadow root. Other nodes
+  // in the shadow root (for example the <style> that card-mod injects for
+  // `card_mod: style:`) are left untouched when the card re-renders.
+  _root() {
+    if (!this._rootEl) {
+      this._rootEl = document.createElement('div');
+      this._rootEl.style.display = 'contents';
+      this.shadowRoot.appendChild(this._rootEl);
+    }
+    return this._rootEl;
+  }
+
+  _isNight() {
+    const sun = this._hass && this._hass.states && this._hass.states['sun.sun'];
+    if (sun && sun.state) return sun.state === 'below_horizon';
+    const h = this._now().getHours();
+    return h < 6 || h >= 20;
+  }
+
+  // winter / spring / summer / autumn, flipped automatically when the
+  // Home Assistant location is in the southern hemisphere.
+  _season() {
+    let m = this._now().getMonth() + 1;
+    const lat = this._hass && this._hass.config && this._hass.config.latitude;
+    if (typeof lat === 'number' && lat < 0) m = ((m + 5) % 12) + 1;
+    if (m === 12 || m <= 2) return 'winter';
+    if (m <= 5) return 'spring';
+    if (m <= 8) return 'summer';
+    return 'autumn';
+  }
+
+  // Folder mode (config: background_folder). Builds stacked layers, most
+  // specific first; the browser shows the first file that exists:
+  //   <folder>/<season>/<day|night>/<condition>.jpg
+  //   <folder>/<day|night>/<condition>.jpg
+  //   <folder>/<season>/<condition>.jpg
+  //   <folder>/<condition>.jpg
+  // The condition only ever comes from a fixed list, so entity text can
+  // never end up in a path.
+  _folderBackgrounds(condition) {
+    const base = safeUrl(String(this.config.background_folder || '').trim().replace(/\/+$/, ''));
+    if (!base) return [];
+    const ext = /^[a-z0-9]{2,5}$/i.test(String(this.config.background_folder_extension || ''))
+      ? String(this.config.background_folder_extension).toLowerCase()
+      : 'jpg';
+    const tod = this._isNight() ? 'night' : 'day';
+    let w = this._normalizeCondition(condition);
+    if (tod === 'night' && w === 'sunny') w = 'clear-night';
+    else if (tod === 'day' && w === 'clear-night') w = 'sunny';
+    if (!Object.prototype.hasOwnProperty.call(CONDITION_ICONS, w)) return [];
+    const season = this._season();
+    return [
+      `${base}/${season}/${tod}/${w}.${ext}`,
+      `${base}/${tod}/${w}.${ext}`,
+      `${base}/${season}/${w}.${ext}`,
+      `${base}/${w}.${ext}`,
+    ].map(safeUrl).filter(Boolean);
+  }
+
   _background(condition) {
     const themed = this._themeBackgrounds();
     if (themed.length) {
       // A video cannot be a CSS background layer: if the first entry is a
       // video it is used alone, otherwise only the image layers are stacked.
       this._bgLayers = this._isVideo(themed[0]) ? [themed[0]] : themed.filter((u) => !this._isVideo(u));
+      return this._bgLayers[0];
+    }
+
+    const folder = this._folderBackgrounds(condition);
+    if (folder.length) {
+      const fallback = safeUrl(this.config.default_background);
+      this._bgLayers = fallback && !this._isVideo(fallback) ? folder.concat([fallback]) : folder;
       return this._bgLayers[0];
     }
 
@@ -413,7 +552,7 @@ class MagisWeatherCard extends HTMLElement {
     const stateObj = this._hass.states[this.config.entity];
 
     if (!stateObj) {
-      this.shadowRoot.innerHTML = `<ha-card><div style="padding:16px;">Entity ${escapeHtml(this.config.entity)} not found.</div></ha-card>`;
+      this._root().innerHTML = `<ha-card><div style="padding:16px;">Entity ${escapeHtml(this.config.entity)} not found.</div></ha-card>`;
       return;
     }
 
@@ -427,7 +566,7 @@ class MagisWeatherCard extends HTMLElement {
     // before the DOM gets rebuilt below, so we can re-attach the same
     // element afterwards instead of restarting playback on every redraw
     // (the clock alone triggers a redraw every 30s).
-    const previousVideo = this.shadowRoot.querySelector('video.bg-video');
+    const previousVideo = this._root().querySelector('video.bg-video');
     const previousVideoSrc = previousVideo ? previousVideo.currentSrc : null;
     const now = new Date();
     const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -461,7 +600,7 @@ class MagisWeatherCard extends HTMLElement {
     const textShadowCss = shadowEnabled ? '1px 1px 3px rgba(0,0,0,0.6)' : 'none';
     const iconShadowCss = shadowEnabled ? 'drop-shadow(1px 1px 2px rgba(0,0,0,0.6))' : 'none';
 
-    this.shadowRoot.innerHTML = `
+    this._root().innerHTML = `
       <style>
         ha-card {
           position: relative;
@@ -626,7 +765,7 @@ class MagisWeatherCard extends HTMLElement {
     // actually changed, so it keeps playing smoothly instead of
     // restarting on every redraw.
     if (bgIsVideo && previousVideo && previousVideoSrc) {
-      const newVideo = this.shadowRoot.querySelector('video.bg-video');
+      const newVideo = this._root().querySelector('video.bg-video');
       if (newVideo && previousVideoSrc === newVideo.currentSrc) {
         newVideo.replaceWith(previousVideo);
       }
@@ -805,12 +944,17 @@ class MagisWeatherCardEditor extends HTMLElement {
           ${themeNames.map((n) => `<option value="${escapeHtml(n)}" ${this._config.theme === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
         </select>
       </div>
-      ${this._config.theme ? `
+      ${(this._config.theme || this._config.theme_background_variable) ? `
       <div class="row">
         <label>Theme background variable (CSS variable holding the background URL)</label>
         <input type="text" data-config-key="theme_background_variable" value="${escapeHtml(this._config.theme_background_variable || '')}" placeholder="lovelace-background">
         <div class="hint">Default: lovelace-background. The value must be a plain url(...) or path; gradients and colors are ignored. If the theme provides nothing, the images below are used as fallback.</div>
       </div>` : ''}
+      <div class="row">
+        <label>Background folder (automatic: season / day-night / condition)</label>
+        <input type="text" data-config-key="background_folder" value="${escapeHtml(this._config.background_folder)}" placeholder="/local/backgrounds/weather">
+        <div class="hint">Looks for &lt;folder&gt;/&lt;season&gt;/&lt;day|night&gt;/&lt;condition&gt;.jpg and falls back to &lt;folder&gt;/&lt;day|night&gt;/&lt;condition&gt;.jpg, &lt;folder&gt;/&lt;season&gt;/&lt;condition&gt;.jpg and &lt;folder&gt;/&lt;condition&gt;.jpg. Seasons: winter, spring, summer, autumn. Images only.</div>
+      </div>
       <div class="row">
         <label>Default background image (default_background)</label>
         <input type="text" data-config-key="default_background" value="${escapeHtml(this._config.default_background)}">
